@@ -459,9 +459,49 @@ static ssize_t smartchg_soh_support_show(struct device *dev, struct device_attri
 }
 static DEVICE_ATTR_RO(smartchg_soh_support);
 
+/*
+ * Battery state-of-health fallback.
+ *
+ * Three nodes end up reporting a value that is either not a percentage at all
+ * or was never populated:
+ *
+ *   battery_soh     chip->batt_soh           raw gauge read, 3026-3082 here
+ *   battery_ui_soh  gauge dataflash UI_SOH   field never written at factory
+ *   soh_report      oplus_chg_debug_info     stays at its initialised value
+ *                                            until a charger plug event runs
+ *                                            oplus_chg_update_soh()
+ *
+ * In every case derive it from the capacities we do trust, which is exactly
+ * what the battery_fcc and design_capacity nodes expose.
+ */
+static int oplus_batt_soh_fallback(struct oplus_chg_chip *chip)
+{
+	int soh;
+	int cap;
+	int fcc;
+
+	if (!chip)
+		return 100;
+
+	cap = chip->batt_capacity_mah;
+	fcc = chip->batt_fcc;
+	if (cap > 0 && fcc > 0)
+		soh = fcc * 100 / cap;
+	else
+		soh = 100;
+
+	if (soh > 100)
+		soh = 100;
+	if (soh <= 0)
+		soh = 100;
+
+	return soh;
+}
+
 static ssize_t battery_soh_show(struct device *dev, struct device_attribute *attr, char *buf)
 {
 	struct oplus_chg_chip *chip = NULL;
+	int soh;
 
 	chip = (struct oplus_chg_chip *)dev_get_drvdata(oplus_battery_dir);
 	if (!chip) {
@@ -469,13 +509,46 @@ static ssize_t battery_soh_show(struct device *dev, struct device_attribute *att
 		return -EINVAL;
 	}
 
-	return sprintf(buf, "%d\n", chip->batt_soh);
+	/*
+	 * battery-health: chip->batt_soh reports a raw gauge register value on
+	 * this device (measured 3026-3082, tracking temperature rather than
+	 * capacity), which is outside 0..100 and makes the ColorOS battery
+	 * health page show a failure. Only report something plausible.
+	 */
+	soh = chip->batt_soh;
+	if (soh <= 0 || soh > 100) {
+		int fcc = chip->batt_fcc;
+		int cap = chip->batt_capacity_mah;
+
+		soh = oplus_batt_soh_fallback(chip);
+		chg_info("batt_soh raw=%d -> reporting %d (fcc=%d cap=%d)\n",
+			chip->batt_soh, soh, fcc, cap);
+	}
+
+	return sprintf(buf, "%d\n", soh);
 }
 static DEVICE_ATTR_RO(battery_soh);
 
 static ssize_t soh_report_show(struct device *dev, struct device_attribute *attr, char *buf)
 {
-	return sprintf(buf, "%d\n", oplus_chg_get_soh_report());
+	struct oplus_chg_chip *chip = NULL;
+	int soh;
+
+	soh = oplus_chg_get_soh_report();
+
+	/*
+	 * battery-health: oplus_chg_get_soh_report() returns
+	 * oplus_chg_debug_info.batt_soh, refreshed only by a charger plug event
+	 * via oplus_chg_update_soh(); otherwise it keeps its initialised value
+	 * (-1 here). Derive it instead.
+	 */
+	if (soh <= 0 || soh > 100) {
+		chip = (struct oplus_chg_chip *)dev_get_drvdata(oplus_battery_dir);
+		soh = oplus_batt_soh_fallback(chip);
+		chg_info("soh_report invalid -> reporting %d\n", soh);
+	}
+
+	return sprintf(buf, "%d\n", soh);
 }
 static DEVICE_ATTR_RO(soh_report);
 
@@ -688,19 +761,26 @@ static DEVICE_ATTR_WO(battery_debug_cc);
 
 static ssize_t battery_ui_soh_show(struct device *dev, struct device_attribute *attr, char *buf)
 {
-	int ui_soh = 0;
-	int len = 0;
+	struct oplus_chg_chip *chip = NULL;
+	int ui_soh;
 
 	ui_soh = oplus_gauge_get_battinfo_ui_soh();
-	if (ui_soh < 0)
-		chg_err("get battery ui soh error");
-	else
-		len = sprintf(buf, "%d\n", ui_soh);
 
-	return len;
+	/*
+	 * battery-health: reads UI_SOH from the gauge BATTINFO dataflash block,
+	 * never written on this device, so the node always reported 0. Fall back
+	 * to the derived value. An explicit value written through the store side
+	 * still wins.
+	 */
+	if (ui_soh <= 0 || ui_soh > 100) {
+		chip = (struct oplus_chg_chip *)dev_get_drvdata(oplus_battery_dir);
+		ui_soh = oplus_batt_soh_fallback(chip);
+		chg_info("battery_ui_soh invalid -> reporting %d\n", ui_soh);
+	}
+
+	return sprintf(buf, "%d\n", ui_soh);
 }
-
-static ssize_t  battery_ui_soh_store(struct device *dev, struct device_attribute *attr,
+static ssize_t battery_ui_soh_store(struct device *dev, struct device_attribute *attr,
 	const char *buf, size_t count)
 {
 	int ret = 0;
