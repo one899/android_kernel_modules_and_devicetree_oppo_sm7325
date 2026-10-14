@@ -5283,7 +5283,12 @@ int oplus_chg_parse_charger_dt(struct oplus_chg_chip *chip)
 	chip->smart_chg_bcc_support = of_property_read_bool(node, "qcom,smart_chg_bcc_support");
 	chg_err("qcom,smart_chg_bcc_support is %d\n", chip->smart_chg_bcc_support);
 
-	chip->smart_chg_soh_support = of_property_read_bool(node, "qcom,smart_chg_soh_support");
+	/* battery-health: the DT property qcom,smart_chg_soh_support is absent on
+ * the OnePlus 9RT device tree and dtbo cannot be reflashed, which left
+ * smartchg_soh_support = 0 and made the ColorOS battery-health page conclude
+ * that SOH reporting is unsupported. Force it on.
+ */
+chip->smart_chg_soh_support = true;
 	chg_err("qcom,smart_chg_soh_support is %d\n", chip->smart_chg_soh_support);
 
 	oplus_chg_endurance_mode_dt(chip);
